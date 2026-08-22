@@ -1,0 +1,9 @@
+{
+  "name": "nida-parse",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "user": "ubuntu",
+  "install": "composer install --no-interaction"
+}
