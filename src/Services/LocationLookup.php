@@ -14,6 +14,20 @@ class LocationLookup
      * (e.g. storage/app/tanzania_locations_combined.csv).
      */
     protected ?string $combinedPath = null;
+    /**
+     * Cache ward lookup results (including misses) for this instance.
+     *
+     * @var array<string, array|null>
+     */
+    protected array $lookupCache = [];
+
+    /**
+     * In-memory index for the combined CSV keyed by WARDCODE.
+     *
+     * @var array<string, array>
+     */
+    protected array $combinedWardIndex = [];
+    protected bool $combinedWardIndexLoaded = false;
 
     public function __construct(?string $csvDir = null, ?string $combinedPath = null)
     {
@@ -81,10 +95,41 @@ class LocationLookup
             echo "Looking for ward {$wardStr} in combined file: {$file}\n";
         }
 
-        if (!file_exists($file)) {
+        $index = $this->loadCombinedWardIndex($file, $debug);
+        if ($index === null) {
             if ($debug) {
-                echo "Combined CSV file not found: {$file}\n";
+                echo "Combined CSV index unavailable for file: {$file}\n";
             }
+            return null;
+        }
+
+        if (array_key_exists($wardStr, $index)) {
+            $result = $index[$wardStr];
+            if ($debug) {
+                echo "Found row in combined file: " . json_encode($result) . "\n";
+            }
+            return $result;
+        }
+
+        if ($debug) {
+            echo "No matching ward code {$wardStr} found in combined file {$file}\n";
+        }
+
+        return null;
+    }
+
+    /**
+     * Build a ward index from the canonical combined CSV once per instance.
+     *
+     * @return array<string, array>|null
+     */
+    protected function loadCombinedWardIndex(string $file, bool $debug = false): ?array
+    {
+        if ($this->combinedWardIndexLoaded) {
+            return $this->combinedWardIndex;
+        }
+
+        if (!file_exists($file)) {
             return null;
         }
 
@@ -103,7 +148,6 @@ class LocationLookup
                 return null;
             }
 
-            // Build index map for safety, though the file should already be canonical.
             $indexMap = [];
             foreach ($headers as $idx => $name) {
                 $upper = strtoupper(trim((string) $name));
@@ -112,6 +156,7 @@ class LocationLookup
                 }
             }
 
+            $buildResult = [];
             while (($row = fgetcsv($handle)) !== false) {
                 if (count($row) === 0) {
                     continue;
@@ -122,16 +167,17 @@ class LocationLookup
                     if (!array_key_exists($upper, $indexMap)) {
                         return '';
                     }
+
                     $idx = $indexMap[$upper];
                     return isset($row[$idx]) ? trim((string) $row[$idx]) : '';
                 };
 
                 $wardCode = $get('WARDCODE');
-                if ($wardCode === '' || (string) $wardCode !== (string) $wardStr) {
+                if ($wardCode === '' || array_key_exists($wardCode, $buildResult)) {
                     continue;
                 }
 
-                $result = [
+                $buildResult[$wardCode] = [
                     'REGION'       => $get('REGION'),
                     'REGIONCODE'   => $get('REGIONCODE'),
                     'DISTRICT'     => $get('DISTRICT'),
@@ -141,22 +187,12 @@ class LocationLookup
                     'STREET'       => $get('STREET'),
                     'PLACES'       => $get('PLACES'),
                 ];
-
-                if ($debug) {
-                    echo "Found row in combined file: " . json_encode($result) . "\n";
-                }
-
-                fclose($handle);
-                return $result;
             }
 
             fclose($handle);
-
-            if ($debug) {
-                echo "No matching ward code {$wardStr} found in combined file {$file}\n";
-            }
-
-            return null;
+            $this->combinedWardIndex = $buildResult;
+            $this->combinedWardIndexLoaded = true;
+            return $this->combinedWardIndex;
         } catch (\Exception $e) {
             if ($debug) {
                 echo "Error reading combined CSV: " . $e->getMessage() . "\n";
@@ -176,10 +212,18 @@ class LocationLookup
             return null;
         }
 
+        if (array_key_exists($wardStr, $this->lookupCache)) {
+            if ($debug) {
+                echo "Returning cached lookup result for ward {$wardStr}\n";
+            }
+            return $this->lookupCache[$wardStr];
+        }
+
         // 1) Prefer the combined Tanzania file if available.
         if ($this->combinedPath !== null) {
             $result = $this->scanCanonicalCsv($this->combinedPath, $wardStr, $debug);
             if ($result !== null) {
+                $this->lookupCache[$wardStr] = $result;
                 return $result;
             }
 
@@ -194,6 +238,7 @@ class LocationLookup
             if ($debug) {
                 echo "ward_id must have at least 2 characters to select a CSV file\n";
             }
+            $this->lookupCache[$wardStr] = null;
             return null;
         }
 
@@ -208,6 +253,7 @@ class LocationLookup
             if ($debug) {
                 echo "CSV file not found: {$csvFilename}\n";
             }
+            $this->lookupCache[$wardStr] = null;
             return null;
         }
 
@@ -283,6 +329,7 @@ class LocationLookup
                     }
 
                     fclose($handle);
+                    $this->lookupCache[$wardStr] = $result;
                     return $result;
                 }
             }
@@ -292,12 +339,14 @@ class LocationLookup
             if ($debug) {
                 echo "No matching ward code {$wardStr} found in {$csvFilename}\n";
             }
+            $this->lookupCache[$wardStr] = null;
             return null;
 
         } catch (\Exception $e) {
             if ($debug) {
                 echo "Error reading CSV: " . $e->getMessage() . "\n";
             }
+            $this->lookupCache[$wardStr] = null;
             return null;
         }
     }
